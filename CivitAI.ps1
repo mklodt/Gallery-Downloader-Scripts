@@ -28,6 +28,7 @@ function Download-Files-From-Database {
 ######################################
 			foreach ($User in $result) {
 				$Username = $User.username
+				$API_Key = bf12a4a949515e196603f054607f814a
 				Write-Host "`nProcessing username $Username..." -ForegroundColor Yellow
 				
 				$ContinueFetching = $true
