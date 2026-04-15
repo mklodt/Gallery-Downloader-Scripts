@@ -1,3 +1,12 @@
+[CmdletBinding()]
+param (
+    [string]$Function,
+    [string]$Query,
+    [string]$Username,
+    [string]$WordFilter = "",
+    [string]$WordFilterExclude = ""
+)
+
 Import-Module PSSQLite
 
 ###############################
@@ -102,8 +111,11 @@ function Download-Files-From-Database {
 		
 		$temp_query = "SELECT username, deviationID, src_url, extension, height, width, title, published_time FROM Files $WhereQuery;"
 	
+        $stopwatch_temp = [System.Diagnostics.Stopwatch]::StartNew()
 		# Write-Host "temp_query: $temp_query" -ForegroundColor Yellow
 		$result = Invoke-SQLiteQuery -DataSource $DBFilePath -Query $temp_query
+        $stopwatch_temp.Stop()
+        Write-Host "`nFetched results in $($stopwatch_temp.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
 ######################################
 		if ($result.Count -gt 0) {
 			Start-Download -SiteName "DeviantArt" -FileList $result
@@ -158,32 +170,19 @@ function Download-Metadata-From-User {
 		Write-Host "Fetching username $username metadata..." -ForegroundColor Yellow
 		$retryCount = 0
 		while ($retryCount -lt $maxRetries) {
+			
 			try {
-				# Make the API request and process the JSON response
-				$Response = Invoke-RestMethod -Uri $URL -Method Get
-				# $Response
-########################################################
-				if ($Response.StatusCode -in 400, 404) {
-					Write-Output "User $username not found (400/404 error)" -ForegroundColor Red
-					$ContinueFetching = $false
-					break
-################################## too many requests, try again
-				} elseif ($Response.StatusCode -in 429, 500) {
-					$delay = Calculate-Delay -retryCount $retryCount
-					
-					$retryCount++
-					
-					Write-Host "error 429/500 encountered. Retrying in $delay milliseconds..." -ForegroundColor Yellow
-					Start-Sleep -Milliseconds $delay
-########################################################
-				} elseif ($Response -and $Response.user.username) {
+				$Response = Invoke-WebRequest -Uri $URL -Method Get -SkipHttpErrorCheck
+				$Json = $Response.Content | ConvertFrom-Json
+			
+				if ($Json.user.username) {
+					# normal success path
 					Write-Host "User found" -ForegroundColor Green
-					
-					$UserID = $Response.user.userid
-					$Country = $Response.country
+					$UserID = $Json.user.userid
+					$Country = $Json.country
 					#fix backtick issues
 					$Country = $Country -replace "'", ""
-					$User_Deviations = $Response.stats.user_deviations
+					$User_Deviations = $Json.stats.user_deviations
 					
 					$username_url = "https://www.deviantart.com/$($Username)/gallery/all"
 					
@@ -192,36 +191,51 @@ function Download-Metadata-From-User {
 					
 					# Write-Host "`ntemp_query is $temp_query"
 					Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
-                    
+					
 					Write-Host "New user $Username added to database." -ForegroundColor Green
+					Start-Sleep -Milliseconds 3000
 					break
+########################################################
+				} elseif ($Json.error_code -in 1,400,404 -or $Json.error_description -in @("Sorry, we have blocked access to this profile.", "Account is inactive.")) {
+					Write-Host "User $Username not found, deleted or blocked (error_description: $($Json.error_description)). Marking user as deleted." -ForegroundColor Red
+					$temp_query = "UPDATE Users SET deleted = 1 WHERE username = '$Username'"
+					Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+					$ContinueFetching = $false
+					return
+				} elseif ($Json.error_code -eq 429) {
+					$delay = Calculate-Delay -retryCount $retryCount
+					$retryCount++
+					Write-Host "error 429 encountered. Retrying in $delay ms..." -ForegroundColor Yellow
+					Start-Sleep -Milliseconds $delay
+				} else {
+					Write-Host "(Download-Metadata-From-User 1) Error: $($Json.error) | Description: $($Json.error_description) | Code: $($Json.error_code) | Status: $($Json.status)" -ForegroundColor Red
+					$ContinueFetching = $false
+					return
 				}
 ########################################################
 			} catch {
-				if ($Response.error_code -in 0, 1, 2) {
-					Write-Host "User $username not found. Skipping..." -ForegroundColor Red
-					$ContinueFetching = $false
-					break
-########################################################
-				} elseif ($Response.error -eq "invalid_request") {
-					Write-Host "Invalid request: $($Response.error_description)" -ForegroundColor Red
-					$ContinueFetching = $false
-					break
-########################################################
-				} else {
-					Write-Host "(Download-Metadata-From-User 1) An unexpected error occurred: $($Response.error_description)" -ForegroundColor Red
-					$ContinueFetching = $false
-					break
-				}
-########################################################
+				Write-Host "Network/transport error: $($_.Exception.Message)" -ForegroundColor Red
+				$ContinueFetching = $false
+				return
 			}
 ########################################################
 		}
 ########################################################
 	} else {
 		Write-Host "`nFound user $Username in database." -ForegroundColor Green
+##########################################
+		#check if deleted
+		$temp_query = "SELECT deleted FROM Users WHERE username = '$Username'"
+		$result = Invoke-SQLiteQuery -DataSource $DBFilePath -Query $temp_query
+							
+		$deleted = $result[0].deleted
+		# Check the result
+		if ($deleted -eq 1) {
+			Write-Host "User $Username is deleted. Skipping..." -ForegroundColor Yellow
+			return #go to next user
+		}
 ################## Check and retrieve access token
-		  $AccessCodeExpired = Check-if-Access-Token-Expired
+		$AccessCodeExpired = Check-if-Access-Token-Expired
 		if ($AccessCodeExpired) {
 			Write-Host "Access token expired. Requesting a new one..." -ForegroundColor Yellow
 			# $Access_Token = Refresh-Access-Token
@@ -253,41 +267,49 @@ function Download-Metadata-From-User {
 					$ContinueFetching = $false
 					Write-Host "This user was updated less than $TimeToCheckAgainMetadata seconds ago. Skipping..." -ForegroundColor Yellow
 ########################################################
-				}	else {
+				} else {
 					$URL = "https://www.deviantart.com/api/v1/oauth2/user/profile/$($Username)?ext_collections=1&ext_galleries=1&access_token=$Access_Token"
 					# Make the API request and process the JSON response
-					
+					# Write-Host "URL: $URL." -ForegroundColor Cyan
+########################################################
 					try {
-						$Response = Invoke-RestMethod -Uri $URL -Method Get
-						
-						if ($Response.StatusCode -in 400, 404) {
-							Write-Output "User $username not found (400/404 error)" -ForegroundColor Red
-							$ContinueFetching = $false
-							# break
-######################################################## too many requests, try again
-						} elseif ($Response.StatusCode -in 429, 500) {
-							$delay = Calculate-Delay -retryCount $retryCount
-							
-							$retryCount++
-							
-							Write-Host "error 429/500 encountered. Retrying in $delay milliseconds..." -ForegroundColor Yellow
-							Start-Sleep -Milliseconds $delay
-						} else {
+						# Always capture the body, even on 400/404/429
+						$Response = Invoke-WebRequest -Uri $URL -Method Get -SkipHttpErrorCheck
+						$Json     = $Response.Content | ConvertFrom-Json
+########################################################
+						if ($Json.stats.user_deviations) {
 							Write-Host "Found user in DeviantArt`s database." -ForegroundColor Yellow
-							$User_Deviations = $Response.stats.user_deviations
-							#update total_user_deviations to current count
+							$User_Deviations = $Json.stats.user_deviations
+					
+							# update total_user_deviations to current count
 							$temp_query = "UPDATE Users SET total_user_deviations = '$User_Deviations' WHERE username = '$Username'"
 							Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+					
+							Start-Sleep -Milliseconds 3000
 ########################################################
-							#update the last_time_fetched_metadata column to NULL
-							# $temp_query = "UPDATE Users SET last_time_fetched_metadata = NULL WHERE username = '$Username'"
-							# Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+						} elseif ($Json.error_code -in 1,400,404 -or $Json.error_description -in @("Sorry, we have blocked access to this profile.", "Account is inactive.")) {
+							Write-Host "User $Username not found, deleted or blocked (error_description: $($Json.error_description)). Marking user as deleted." -ForegroundColor Red
+							$temp_query = "UPDATE Users SET deleted = 1 WHERE username = '$Username'"
+							Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+							$ContinueFetching = $false
+							return
 ########################################################
+						} elseif ($Json.error_code -eq 429) {
+							$delay = Calculate-Delay -retryCount $retryCount
+							$retryCount++
+							Write-Host "error 429 encountered. Retrying in $delay milliseconds..." -ForegroundColor Yellow
+							Start-Sleep -Milliseconds $delay
+########################################################
+						} else {
+							Write-Host "(Download-Metadata-From-User 2) Error: $($Json.error) | Description: $($Json.error_description) | Code: $($Json.error_code) | Status: $($Json.status)" -ForegroundColor Red
+							$ContinueFetching = $false
+							return
 						}
 ########################################################
 					} catch {
-						Write-Host "(Download-Metadata-From-User 2) An unexpected error occurred: $($_.Exception.Message)" -ForegroundColor Red
+						Write-Host "Network/transport error: $($_.Exception.Message)" -ForegroundColor Red
 						$ContinueFetching = $false
+						return
 					}
 ########################################################
 				}
@@ -332,6 +354,7 @@ function Download-Metadata-From-User {
 						Write-Host "Access token expired. Requesting a new one..." -ForegroundColor Red
 						# $Access_Token = Refresh-Access-Token
 						$Access_Token = Refresh-Access-Token-Client-Credentials
+						Start-Sleep -Milliseconds 3000
 					}
 					# $headers = @{
 						# Authorization = "Bearer $Access_Token"
@@ -340,11 +363,13 @@ function Download-Metadata-From-User {
 					# $Access_Token = "5c3ce678136a4fdb86afbff500771e8d2348e03bf53bfe3625"
 					
 					$URLConsole = "https://www.deviantart.com/api/v1/oauth2/gallery/all?username=$($Username)&offset=$($Cur_Offset)&limit=$($Limit)&mature_content=$($AllowMatureContent)&access_token=access_token_here"
-					Write-Host "`nURL: $URLConsole" -ForegroundColor Yellow
+					Write-Host "URL: $URLConsole" -ForegroundColor Yellow
 					
 					$URL = "https://www.deviantart.com/api/v1/oauth2/gallery/all?username=$($Username)&offset=$($Cur_Offset)&limit=$($Limit)&mature_content=$($AllowMatureContent)&access_token=$Access_Token"
 					# $Response = Invoke-RestMethod -Uri $URL -Method Get -Headers $headers
-					$Response = Invoke-RestMethod -Uri $URL -Method Get
+					# $Response = Invoke-RestMethod -Uri $URL -Method Get
+					$Result = Invoke-WebRequest -Uri $URL -Method Get -SkipHttpErrorCheck 
+					$Response = $Result.Content | ConvertFrom-Json
 					# $response
 ########################################################
 					# Check if there are any files returned in the response
@@ -474,7 +499,7 @@ function Download-Metadata-From-User {
 												Write-Host "Added File $DeviationID ($FileTitle) ($FileExtension) to database." -ForegroundColor Green
 ################################################################################
 											#videos
-											} elseif ($File.PSObject.Properties['videos']) {
+											} elseif ($File.PSObject.Properties['videos'] -and $File.videos.Count -gt 0) {
 												# Write-Output "Found video"
 												#get the highest quality video
 												$highestResolutionVideo = $File.videos | Sort-Object { [int]($_.quality -replace 'p', '') } -Descending | Select-Object -First 1
@@ -671,7 +696,7 @@ function Download-Metadata-From-User {
 						Write-Host "error 429/500 encountered. Retrying in $delay milliseconds..." -ForegroundColor Red
 						
 						#increase this by X seconds each time
-						$TimeToWait = $TimeToWait + 500
+						$TimeToWait = $TimeToWait + 100
 						Write-Host "Time to wait between requests increased to $TimeToWait." -ForegroundColor Yellow
 						
 						Start-Sleep -Milliseconds $delay
@@ -686,8 +711,27 @@ function Download-Metadata-From-User {
 						# $HasMoreFiles = $false
 						# break
 ########################################################
+					} elseif ($Response.error_code -in 1,400,404 -or $Response.error_description -in @("Sorry, we have blocked access to this profile.", "Account is inactive.")) {
+						Write-Host "User $Username not found, deleted or blocked (error_description: $($Response.error_description)). Marking user as deleted." -ForegroundColor Red
+						$temp_query = "UPDATE Users SET deleted = 1 WHERE username = '$Username'"
+						Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+						$ContinueFetching = $false
+						return
+					} elseif ($Response.error_code -eq 429) {
+						$delay = Calculate-Delay -retryCount $retryCount
+						$retryCount++
+						Write-Host "error 429 encountered. Retrying in $delay ms..." -ForegroundColor Yellow
+						Start-Sleep -Milliseconds $delay
+					#invalid token 
+					} elseif ($Response.error_description -eq "Invalid token.") {
+						Write-Host "Access token invalid. Requesting a new one..." -ForegroundColor Yellow
+						# $Access_Token = Refresh-Access-Token
+						$Access_Token = Refresh-Access-Token-Client-Credentials
+						Write-Host "Refreshed access token. Retrying..." -ForegroundColor Yellow
+						Start-Sleep -Milliseconds $TimeToWait
+########################################################
 					} else {
-						Write-Host "An unexpected error occurred: $($_.Exception.Message)" -ForegroundColor Red
+						Write-Host "(Download-Metadata-From-User 3) Error: $($Response.error) | Description: $($Response.error_description) | Code: $($Response.error_code) | Status: $($Response.status)" -ForegroundColor Red
 						$HasMoreFiles = $false
 						break
 					}
@@ -703,49 +747,6 @@ function Download-Metadata-From-User {
 }
 ########################################################
 
-
-############################################
-#create database file if it doesn`t exist
-if (-not (Test-Path $DBFilePath)) {
-	$createTableQuery = "CREATE TABLE Auth (
-		access_token TEXT,
-		access_token_creation_date TEXT,
-		refresh_token TEXT,
-		refresh_token_creation_date TEXT
-		);"
-	Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
-	
-	$createTableQuery = "CREATE TABLE Users (
-		username TEXT PRIMARY KEY,
-		userID TEXT,
-		url TEXT,
-		country TEXT,
-		deviations_in_database INTEGER DEFAULT 0,
-		locked_deviations INTEGER DEFAULT 0,
-		total_user_deviations INTEGER DEFAULT 0,
-		last_time_fetched_metadata TEXT,
-		last_time_downloaded TEXT,
-		cur_offset INTEGER DEFAULT 0
-		);"
-	Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
-	
-	$createTableQuery = "CREATE TABLE Files (
-		deviationID TEXT PRIMARY KEY,
-		url TEXT,
-		src_url TEXT,
-		extension TEXT,
-		width INTEGER,
-		height INTEGER,
-		title TEXT,
-		username TEXT,
-		published_time TEXT,
-		downloaded INTEGER DEFAULT 0 CHECK (downloaded IN (0,1)),
-		favorite INTEGER DEFAULT 0 CHECK (downloaded IN (0,1)),
-		deleted INTEGER DEFAULT 0 CHECK (downloaded IN (0,1))
-		);"
-	Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
-}
-############################################
 
 
 ############################################
@@ -765,15 +766,36 @@ function Process-Users {
 	
 }
 ############################################
-####################################
-####################################
+function Process-Users-MetadataOnly {
+	# Loop through the user list and download files
+	foreach ($User in $UserList) {
+		$Username = $User[0]
+		$WordFilter = $User[1]
+		$WordFilterExclude = $User[2]
+		
+		Download-Metadata-From-User -Username $Username -WordFilter $WordFilter -WordFilterExclude $WordFilterExclude
+		
+		# Start-Sleep -Milliseconds $TimeToWait
+	}
+}
+############################################
+#create database file if it doesn`t exist
+Create-Database-If-It-Doesnt-Exist -SiteName "DeviantArt" -DBFilePath $DBFilePath
+#Set the defaults for DB
+$temp_query = "PRAGMA default_cache_size = $PRAGMA_default_cache_size;"
+Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+$temp_query = "PRAGMA journal_mode = WAL;"
+Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+$temp_query = "PRAGMA synchronous = NORMAL;"
+Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+############################################
 $RefreshTokenExpired = Check-if-Refresh-Token-Expired
 #expired
 if ($RefreshTokenExpired) {
 	$Access_Token = Get-Tokens-From-Authorization-Code
 }
 
-function Graphical-Options {
+function Show-Menu {
     param (
         [string]$Query = ""
     )
@@ -813,7 +835,7 @@ function Graphical-Options {
 				Backup-Database
 				
 				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-				Process-Users
+				Process-Users-MetadataOnly
 				$stopwatch_main.Stop()
 				Write-Host "`nDownloaded all metadata from users in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
 				[console]::beep()
@@ -853,70 +875,81 @@ function Graphical-Options {
 		# Write-Output "Transcript stopped"
 	}
 }
-############################################
-function Execute-Function {
-    param (
-        [int]$function,
-        [string]$Query = ""
-    )
-	
+##########################################################################
+# Handle refresh token expiration if it's outside a function
+$RefreshTokenExpired = Check-if-Refresh-Token-Expired
+if ($RefreshTokenExpired) {
+	$Access_Token = Get-Tokens-From-Authorization-Code
+}
+##########################################################################
+if ($Function) {
 	try {
 		# Start logging
 		$CurrentDate = Get-Date -Format "yyyyMMdd_HHmmss"
 		Start-Transcript -Path "$PSScriptRoot/logs/DeviantArt_$($CurrentDate).log" -Append
-############################################
-		if ($function -eq 1) {
-			Backup-Database
-			
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Process-Users
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all metadata from users in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Download-Files-From-Database -Type 1
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all files from database in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			[console]::beep()
-##########################################
-		} elseif ($function -eq 2){
-			Backup-Database
-			
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Process-Users
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all metadata from users in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			[console]::beep()
-##########################################
-		} elseif ($function -eq 3){
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Download-Files-From-Database -Type 1
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all files from database in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			[console]::beep()
-##########################################
-		} elseif ($function -eq 4){
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Download-Files-From-Database -Type 2 -Query $Query
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded files from query in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			[console]::beep()
-##########################################
-		} elseif ($function -eq 5){
-			Backup-Database
-			Scan-Folder-And-Add-Files-As-Favorites -Type 4
-			[console]::beep()
-##########################################
-		} else {
-			Write-Host "`nInvalid choice." -ForegroundColor Red
+		switch ($Function) {
+			'DownloadAllMetadataAndFiles' { 
+				Backup-Database
+				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+				Process-Users
+				$stopwatch_main.Stop()
+				Write-Host "`nDownloaded all metadata from users in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+				Download-Files-From-Database -Type 1
+				$stopwatch_main.Stop()
+				Write-Host "`nDownloaded all files from database in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+			}
+			'DownloadAllMetadata' { 
+				Backup-Database
+				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+				Process-Users-MetadataOnly
+				$stopwatch_main.Stop()
+				Write-Host "`nDownloaded all metadata from users in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+			}
+			'DownloadOnlyFiles' { 
+				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+				Download-Files-From-Database -Type 1
+				$stopwatch_main.Stop()
+				Write-Host "`nDownloaded all files from database in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+			}
+			'DownloadFilesFromQuery' {
+				if ([string]::IsNullOrWhiteSpace($Query)) {
+					Write-Host "The -Query parameter is required for the DownloadFilesFromQuery function." -ForegroundColor Red
+				} else {
+					$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+					Download-Files-From-Database -Type 2 -Query $Query
+					$stopwatch_main.Stop()
+					Write-Host "`nDownloaded files from query in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+				}
+			}
+			'ScanFolderForFavorites' { 
+				Backup-Database
+				Scan-Folder-And-Add-Files-As-Favorites -Type 4
+			}
+			'DownloadMetadataForSingleUser' {
+				if ([string]::IsNullOrWhiteSpace($Username)) {
+					Write-Host "The -Username parameter is required for the DownloadMetadataForSingleUser function." -ForegroundColor Red
+				} else {
+					Backup-Database
+					$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+					Download-Metadata-From-User -Username $Username -WordFilter $WordFilter -WordFilterExclude $WordFilterExclude
+					$stopwatch_main.Stop()
+					Write-Host "`nDownloaded metadata for user $Username in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+				}
+			}
+			default { Write-Host "Invalid function name: $Function" -ForegroundColor Red }
 		}
-##########################################
+##########################################################################
 	} catch {
 		Write-Error "An error occurred (line $($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
 	} finally {
 		Stop-Transcript
-		# Write-Output "Transcript stopped"
+		[console]::beep()
+		# Pause
 	}
+##########################################################################
+} else {
+    Show-Menu
+    [console]::beep()
+    # Pause
 }
-############################################
-

@@ -272,6 +272,7 @@ function Scan-Folder-And-Add-Files-As-Favorites {
         $processedCount += $matchedFiles.Count
         Write-Host "Finished processing $processedCount total files." -ForegroundColor Cyan
     }
+	# pause
 }
 ####################################################
 function Process-BatchFiles {
@@ -628,13 +629,13 @@ function Handle-Errors {
 			$retryCount++
 			
 			if ($StatusCode -eq 429) {
-				Write-Host "Error 429: Too Many Requests. Retrying in $delay milliseconds..." -ForegroundColor Red
+				Write-Warning "Error 429: Too Many Requests. Retrying in $delay milliseconds..."
 			} elseif ($StatusCode -eq 500) {
-				Write-Host "Error 500: Internal Server Error. Retrying in $delay milliseconds..." -ForegroundColor Red
+				Write-Warning "Error 500: Internal Server Error. Retrying in $delay milliseconds..."
 			} elseif ($StatusCode -eq 520) {
-				Write-Host "Error 520: Internal Server Error. Retrying in $delay milliseconds..." -ForegroundColor Red
+				Write-Warning "Error 520: Internal Server Error. Retrying in $delay milliseconds..."
 			} elseif ($StatusCode -eq 1015) {
-				Write-Host "Error 1015: Rate limited. Retrying in $delay milliseconds..." -ForegroundColor Red
+				Write-Warning "Error 1015: Rate limited. Retrying in $delay milliseconds..."
 			}
 		
 			Start-Sleep -Milliseconds $delay
@@ -644,16 +645,21 @@ function Handle-Errors {
 #####################################
 		} elseif ($StatusCode -in 404, 401) {
 			if ($StatusCode -eq 404) {
-				Write-Host "(ID: $FileIdentifier) Error 404. This means the file was deleted. It will be set to deleted in the database so that it's not processed again." -ForegroundColor Red
-				$temp_query = "UPDATE Files SET deleted, downloaded = 1 WHERE $DataQuery"
+				Write-Warning "(ID: $FileIdentifier) Error 404. This means the file was deleted. It will be set to deleted in the database so that it's not processed again."
+				$temp_query = "UPDATE Files SET deleted = 1 WHERE $DataQuery"
 				Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
 				
 				#it seems now civitai is more agressive with their rate limits. This waits X milliseconds before going to the next file.
 				Start-Sleep -Milliseconds 300
 #####################################
 			} elseif ($StatusCode -eq 401) {
-				Write-Host "(ID: $FileIdentifier) Error 401. This means the file was locked by its creator, and you do not have access to it. It will be set to downloaded in the database so that it's not processed again." -ForegroundColor Red
-				$temp_query = "UPDATE Files SET downloaded = 1 WHERE $DataQuery"
+				if ($Site = "DeviantArt") {
+					Write-Warning "(ID: $FileIdentifier) Error 401. This means the file was locked by its creator, and you do not have access to it. It will be set to locked in the database so that it's not processed again."
+					$temp_query = "UPDATE Files SET locked = 1 WHERE $DataQuery"
+				} else {
+					Write-Warning "(ID: $FileIdentifier) Error 401. This means the file was locked by its creator, and you do not have access to it. It will be set to downloaded in the database so that it's not processed again."
+					$temp_query = "UPDATE Files SET downloaded = 1 WHERE $DataQuery"
+				}
 				Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
 				
 				#This waits X milliseconds before going to the next file.
@@ -666,7 +672,7 @@ function Handle-Errors {
 		} elseif ($ErrorMessage -like "*Could not find a part of the path*") {
 			$retryCount++
 			
-			Write-Host "$ErrorMessage. Retrying..." -ForegroundColor Red
+			Write-Warning "$ErrorMessage. Retrying..."
 
 			Start-Sleep -Milliseconds $delay
 			
@@ -674,7 +680,7 @@ function Handle-Errors {
 			return $retryCount, $BreakLoop
 #####################################
 		} else {
-			Write-Host "Failed to fetch file (ID: $FileIdentifier) for user $($Username): $($ErrorMessage)" -ForegroundColor Red
+			Write-Warning "Failed to fetch file (ID: $FileIdentifier) for user $($Username): $($ErrorMessage)"
 			$BreakLoop = $true
 			return $retryCount, $BreakLoop
 		}
@@ -954,7 +960,7 @@ function Start-Download {
                             if ($StatusCode -eq 404) {
                                 $handledErrorMessage = "File was deleted (404 error) - marked as deleted in database"
                             } elseif ($StatusCode -eq 401) {
-                                $handledErrorMessage = "File is locked/private (401 error) - marked as downloaded in database"
+                                $handledErrorMessage = "File is locked/private (401 error) - marked as locked in database"
                             } else {
                                 $handledErrorMessage = "HTTP Error $StatusCode`: $ErrorMessage"
                             }
@@ -1036,7 +1042,7 @@ function Start-Download {
                             if ($StatusCode -eq 404) {
                                 $handledErrorMessage = "File was deleted (404 error) - marked as deleted in database"
                             } elseif ($StatusCode -eq 401) {
-                                $handledErrorMessage = "File is locked/private (401 error) - marked as downloaded in database"
+                                $handledErrorMessage = "File is locked/private (401 error) - marked as locked in database"
                             } else {
                                 $handledErrorMessage = "General Error (Status: $StatusCode): $ErrorMessage"
                             }
@@ -1044,18 +1050,20 @@ function Start-Download {
                         }
                     }
                     
+                    
+                    #This was removed because the Handle-Errors function already has a delay
                     # Add delay between retries (with cancellation check)
-                    if ($retryCount -lt $maxRetries -and -not $downloadSuccessful -and -not $handledError) {
-                        $delaySeconds = [Math]::Min(2 * $retryCount, 10)
-                        for ($i = 0; $i -lt $delaySeconds; $i++) {
-                            if ($CancellationToken.IsCancellationRequested) {
-                                $result.Cancelled = $true
-                                $result.Message = "Download cancelled"
-                                return $result
-                            }
-                            Start-Sleep -Seconds 1
-                        }
-                    }
+                    # if ($retryCount -lt $maxRetries -and -not $downloadSuccessful -and -not $handledError) {
+                    #     $delaySeconds = [Math]::Min(2 * $retryCount, 10)
+                    #     for ($i = 0; $i -lt $delaySeconds; $i++) {
+                    #         if ($CancellationToken.IsCancellationRequested) {
+                    #             $result.Cancelled = $true
+                    #             $result.Message = "Download cancelled"
+                    #             return $result
+                    #         }
+                    #         Start-Sleep -Seconds 1
+                    #     }
+                    # }
                 }
                 
                 # Set the appropriate result message
@@ -1329,7 +1337,7 @@ function Check-if-Access-Token-Expired {
 					return $true
 				}	else {
 					$TimeToExpire = 3600 - $SecondsDifference
-					Write-Host "`nAccess token will expire in $TimeToExpire seconds." -ForegroundColor Yellow
+					Write-Host "Access token will expire in $TimeToExpire seconds." -ForegroundColor Yellow
 					return $false
 				}
 ########################
@@ -1492,3 +1500,181 @@ function Refresh-Access-Token-Client-Credentials {
 ####################################
 }
 ####################################
+function Create-Database-If-It-Doesnt-Exist {
+	param (
+        [string]$SiteName,  # Site name (e.g., "Gelbooru", "CivitAI", etc.)
+        [string]$DBFilePath	# database path
+    )
+	
+	#check if database exists
+	if (-not (Test-Path $DBFilePath)) {
+########################################################################
+		#create database file
+		if ($SiteName = "CivitAI") {
+			$createTableQuery = "CREATE TABLE Users (
+				username TEXT PRIMARY KEY,
+				url TEXT,
+				total_files INTEGER DEFAULT 0,
+				cur_cursor TEXT,
+				last_time_fetched_metadata TEXT,
+				last_time_downloaded TEXT,
+				deleted INTEGER DEFAULT 0 CHECK (deleted IN (0,1))
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+			
+			$createTableQuery = "CREATE TABLE Files (
+				id INTEGER PRIMARY KEY,
+				filename TEXT,
+				extension TEXT,
+				width INTEGER,
+				height INTEGER,
+				url TEXT,
+				createdAt TEXT,
+				postId INTEGER DEFAULT 0,
+				username TEXT,
+				rating TEXT,
+				meta_size TEXT,
+				meta_seed INTEGER DEFAULT 0,
+				meta_model TEXT,
+				meta_steps INTEGER DEFAULT 0,
+				meta_prompt TEXT,
+				meta_sampler TEXT,
+				meta_cfgScale INTEGER DEFAULT 0,
+				meta_clip_skip INTEGER DEFAULT 0,
+				meta_hires_upscale INTEGER DEFAULT 0,
+				meta_hires_upscaler TEXT,
+				meta_negativePrompt TEXT,
+				meta_denoising_strength FLOAT DEFAULT 0,
+				downloaded INTEGER DEFAULT 0 CHECK (downloaded IN (0,1)),
+				favorite INTEGER DEFAULT 0 CHECK (favorite IN (0,1)),
+				deleted INTEGER DEFAULT 0 CHECK (deleted IN (0,1))
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+########################################################################
+		} elseif ($SiteName = "DeviantArt") {
+			$createTableQuery = "CREATE TABLE Auth (
+				access_token TEXT,
+				access_token_creation_date TEXT,
+				refresh_token TEXT,
+				refresh_token_creation_date TEXT
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+			
+			$createTableQuery = "CREATE TABLE Users (
+				username TEXT PRIMARY KEY,
+				userID TEXT,
+				url TEXT,
+				country TEXT,
+				deviations_in_database INTEGER DEFAULT 0,
+				locked_deviations INTEGER DEFAULT 0,
+				total_user_deviations INTEGER DEFAULT 0,
+				last_time_fetched_metadata TEXT,
+				last_time_downloaded TEXT,
+				cur_offset INTEGER DEFAULT 0,
+				deleted INTEGER DEFAULT 0 CHECK (deleted IN (0,1))
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+			
+			$createTableQuery = "CREATE TABLE Files (
+				deviationID TEXT PRIMARY KEY,
+				url TEXT,
+				src_url TEXT,
+				extension TEXT,
+				width INTEGER,
+				height INTEGER,
+				title TEXT,
+				username TEXT,
+				published_time TEXT,
+				downloaded INTEGER DEFAULT 0 CHECK (downloaded IN (0,1)),
+				favorite INTEGER DEFAULT 0 CHECK (favorite IN (0,1)),
+				locked INTEGER DEFAULT 0 CHECK (locked IN (0,1)),
+				deleted INTEGER DEFAULT 0 CHECK (deleted IN (0,1))
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+########################################################################
+		} elseif ($SiteName = "Kemono") {
+			$createTableQuery = "CREATE TABLE Creators (
+				creatorID TEXT PRIMARY KEY,
+				creatorName TEXT,
+				service TEXT,
+				date_indexed TEXT,
+				date_updated TEXT,
+				last_time_fetched_metadata TEXT,
+				last_time_downloaded TEXT,
+				page_offset INTEGER DEFAULT 0),
+				deleted INTEGER DEFAULT 0 CHECK (deleted IN (0,1))
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+			
+			$createTableQuery = "CREATE TABLE Posts (
+				postID TEXT PRIMARY KEY,
+				creatorName TEXT,
+				title TEXT,
+				content TEXT,
+				total_files INTEGER DEFAULT 0,
+				date_published TEXT,
+				date_added TEXT,
+				downloaded INTEGER DEFAULT 0 CHECK (downloaded IN (0,1))
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+			
+			$createTableQuery = "CREATE TABLE Files (
+				hash TEXT PRIMARY KEY,
+				hash_extension TEXT,
+				filename TEXT,
+				filename_extension TEXT,
+				url TEXT,
+				file_index INTEGER DEFAULT 0,
+				creatorName TEXT,
+				postID TEXT,
+				downloaded INTEGER DEFAULT 0 CHECK (downloaded IN (0,1)),
+				favorite INTEGER DEFAULT 0 CHECK (favorite IN (0,1)),
+				deleted INTEGER DEFAULT 0 CHECK (deleted IN (0,1))
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+########################################################################
+		} elseif ($SiteName = "Rule34xxx") {
+			$createTableQuery = "CREATE TABLE Queries (
+				query TEXT PRIMARY KEY,
+				query_name TEXT,
+				results_per_page INTEGER DEFAULT 1000,
+				minID INTEGER DEFAULT -1,
+				maxID INTEGER DEFAULT -1,
+				last_id INTEGER DEFAULT 0,
+				last_time_fetched_metadata TEXT,
+				last_time_downloaded TEXT
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+			
+			$createTableQuery = "CREATE TABLE Files (
+				id INTEGER PRIMARY KEY,
+				url TEXT,
+				hash TEXT,
+				extension TEXT,
+				width INTEGER DEFAULT 0,
+				height INTEGER DEFAULT 0,
+				createdAt TEXT,
+				source TEXT,
+				main_tag TEXT,
+				tags_artist TEXT,
+				tags_character TEXT,
+				tags_general TEXT,
+				tags_copyright TEXT,
+				tags_meta TEXT,
+				downloaded INTEGER DEFAULT 0 CHECK (downloaded IN (0,1)),
+				favorite INTEGER DEFAULT 0 CHECK (favorite IN (0,1)),
+				deleted INTEGER DEFAULT 0 CHECK (deleted IN (0,1))
+				);"
+			Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
+########################################################################
+		} else {
+			Write-Host "Invalid Site name for database creation." -ForegroundColor Red
+		}
+########################################################################
+	}
+########################################################################
+}
+
+
+
+########################################################################

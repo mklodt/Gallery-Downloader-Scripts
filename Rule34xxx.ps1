@@ -1,3 +1,15 @@
+
+
+[CmdletBinding()]
+param (
+    [string]$Function,
+    [string]$Query,
+    [string]$QueryName,
+    [string]$MinID = "-1",
+    [string]$MaxID = "-1",
+    [string]$Results_per_Page = "1000"
+)
+
 Import-Module PSSQLite
 
 ############################################
@@ -100,8 +112,11 @@ function Download-Files-From-Database {
 		
 		$temp_query = "SELECT id, url, hash, extension, createdAt, tags_artist, tags_character FROM Files $WhereQuery;"
 
+        $stopwatch_temp = [System.Diagnostics.Stopwatch]::StartNew()
 		# Write-Host "temp_query: $temp_query" -ForegroundColor Yellow
 		$result = Invoke-SQLiteQuery -DataSource $DBFilePath -Query $temp_query
+        $stopwatch_temp.Stop()
+        Write-Host "`nFetched results in $($stopwatch_temp.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
 ######################################
 		if ($result.Count -gt 0) {
 			Start-Download -SiteName "Gelbooru_Based" -FileList $result
@@ -552,43 +567,15 @@ function Download-Metadata-From-Query {
 }
 ############################################
 #create database file if it doesn`t exist
-if (-not (Test-Path $DBFilePath)) {
-	$createTableQuery = "CREATE TABLE Queries (
-		query TEXT PRIMARY KEY,
-		query_name TEXT,
-		results_per_page INTEGER DEFAULT 1000,
-		minID INTEGER DEFAULT -1,
-		maxID INTEGER DEFAULT -1,
-		last_id INTEGER DEFAULT 0,
-		last_time_fetched_metadata TEXT,
-		last_time_downloaded TEXT
-		)"
-	
-	Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
-	
-	$createTableQuery = "CREATE TABLE Files (
-		id INTEGER PRIMARY KEY,
-		url TEXT,
-		hash TEXT,
-		extension TEXT,
-		width INTEGER DEFAULT 0,
-		height INTEGER DEFAULT 0,
-		createdAt TEXT,
-		source TEXT,
-		main_tag TEXT,
-		tags_artist TEXT,
-		tags_character TEXT,
-		tags_general TEXT,
-		tags_copyright TEXT,
-		tags_meta TEXT,
-		downloaded INTEGER DEFAULT 0 CHECK (downloaded IN (0,1)),
-		favorite INTEGER DEFAULT 0 CHECK (downloaded IN (0,1)),
-		deleted INTEGER DEFAULT 0 CHECK (downloaded IN (0,1))
-		)"
-	
-	Invoke-SQLiteQuery -Database $DBFilePath -Query $createTableQuery
-}
-
+Create-Database-If-It-Doesnt-Exist -SiteName "Rule34xxx" -DBFilePath $DBFilePath
+#Set the defaults for DB
+$temp_query = "PRAGMA default_cache_size = $PRAGMA_default_cache_size;"
+Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+$temp_query = "PRAGMA journal_mode = WAL;"
+Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+$temp_query = "PRAGMA synchronous = NORMAL;"
+Invoke-SqliteQuery -DataSource $DBFilePath -Query $temp_query
+############################################
 
 ###############################
 ## have to load tags from database and make a list from them
@@ -676,7 +663,7 @@ function Process-Queries {
 	}
 }
 ############################################
-function Graphical-Options {
+function Show-Menu {
     param (
         [string]$Query = ""
     )
@@ -754,72 +741,75 @@ function Graphical-Options {
 		# Write-Output "Transcript stopped"
 	}
 }
-####################################################
-					
-############################################
-function Execute-Function {
-    param (
-        [int]$function,
-        [string]$Query = ""
-    )
-	
+##########################################################################
+if ($Function) {
 	try {
 		# Start logging
 		$CurrentDate = Get-Date -Format "yyyyMMdd_HHmmss"
 		Start-Transcript -Path "$PSScriptRoot/logs/Rule34xxx_$($CurrentDate).log" -Append
-###############################
-		if ($function -eq 1) {
-			Backup-Database
-			
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Process-Queries
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all metadata from queries in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Download-Files-From-Database -Type 1
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all files from database in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			[console]::beep()
-###############################
-		} elseif ($function -eq 2){
-			Backup-Database
-			
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Process-Queries
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all metadata from queries in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			[console]::beep()
-###############################
-		} elseif ($function -eq 3){
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Download-Files-From-Database -Type 1
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all files from database in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			[console]::beep()
-###############################
-		} elseif ($function -eq 4){
-			$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
-			Download-Files-From-Database -Type 2 -Query $Query
-			$stopwatch_main.Stop()
-			Write-Host "`nDownloaded all files from query in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
-			[console]::beep()
-###############################
-		} elseif ($function -eq 5){
-			Backup-Database
-			Scan-Folder-And-Add-Files-As-Favorites -Type 1
-			[console]::beep()
-###############################
-		} else {
-			Write-Host "`nInvalid choice. Try again." -ForegroundColor Red
+		switch ($Function) {
+			'DownloadAllMetadataAndFiles' { 
+				Backup-Database
+				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+				Process-Queries
+				$stopwatch_main.Stop()
+				Write-Host "`nDownloaded all metadata from queries in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+				Download-Files-From-Database -Type 1
+				$stopwatch_main.Stop()
+				Write-Host "`nDownloaded all files from database in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+			}
+			'DownloadAllMetadata' { 
+				Backup-Database
+				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+				Process-Queries
+				$stopwatch_main.Stop()
+				Write-Host "`nDownloaded all metadata from queries in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+			}
+			'DownloadOnlyFiles' { 
+				$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+				Download-Files-From-Database -Type 1
+				$stopwatch_main.Stop()
+				Write-Host "`nDownloaded all files from database in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+			}
+			'DownloadFilesFromQuery' {
+				if ([string]::IsNullOrWhiteSpace($Query)) {
+					Write-Host "The -Query parameter is required for the DownloadFilesFromQuery function." -ForegroundColor Red
+				} else {
+					$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+					Download-Files-From-Database -Type 2 -Query $Query
+					$stopwatch_main.Stop()
+					Write-Host "`nDownloaded all files from query in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+				}
+			}
+			'ScanFolderForFavorites' { 
+				Backup-Database
+				Scan-Folder-And-Add-Files-As-Favorites -Type 1
+			}
+			'DownloadMetadataForSingleQuery' {
+				if ([string]::IsNullOrWhiteSpace($QueryName) -or [string]::IsNullOrWhiteSpace($Query)) {
+					Write-Host "The -QueryName and -Query parameters are required for the DownloadMetadataForSingleQuery function." -ForegroundColor Red
+				} else {
+					Backup-Database
+					$stopwatch_main = [System.Diagnostics.Stopwatch]::StartNew()
+					Download-Metadata-From-Query -QueryName $QueryName -MinID $MinID -MaxID $MaxID -Results_per_Page $Results_per_Page -Query $Query
+					$stopwatch_main.Stop()
+					Write-Host "`nDownloaded metadata for query '$QueryName' in $($stopwatch_main.Elapsed.TotalSeconds) seconds." -ForegroundColor Green
+				}
+			}
+			default { Write-Host "Invalid function name: $Function" -ForegroundColor Red }
 		}
-#################################
+##########################################################################
 	} catch {
 		Write-Error "An error occurred (line $($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
 	} finally {
 		Stop-Transcript
-		# Write-Output "Transcript stopped"
+		[console]::beep()
+		# Pause
 	}
+##########################################################################
+} else {
+    Show-Menu
+    [console]::beep()
+    # Pause
 }
-####################################################
-# pause
